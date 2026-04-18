@@ -1,0 +1,24 @@
+# Orbital RL — Python dependencies
+# Tested on Python 3.10 and 3.11
+
+# RL framework
+gymnasium>=0.29.0
+stable-baselines3>=2.2.0
+
+# Physics & numerics
+numpy>=1.26.0,<2.0.0
+scipy>=1.11.0
+
+# Visualisation
+matplotlib>=3.8.0
+
+# Training utilities
+tensorboard>=2.15.0
+tqdm>=4.66.0
+rich>=13.0.0
+
+# GIF export (optional, for enjoy.py --save_gif)
+Pillow>=10.0.0
+
+# Testing
+pytest>=7.4.0
