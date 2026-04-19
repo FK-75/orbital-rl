@@ -1,16 +1,28 @@
 """
 OrbitalEnv — Gymnasium Environment for Orbital RL
 ==================================================
-Supports two tasks via the `task` constructor argument:
+Supports two tasks and two dimensionalities:
 
-  "docking"         — chaser must rendezvous with the origin (target spacecraft)
-  "station_keeping" — chaser must stay inside a defined orbital box
+  task="docking"         — navigate to dock with target at origin
+  task="station_keeping" — hold position inside a defined orbital box
 
-Observation space (normalised, all in [-1, 1] approximately):
-  [x_norm, y_norm, vx_norm, vy_norm, fuel_norm]
+  mode="2d"  — in-plane only (x, y) — faster training
+  mode="3d"  — full 3D including cross-track z-axis
 
-Action space (continuous):
-  [fx, fy] — specific force (acceleration) per axis, clipped to max_thrust
+3D adds the out-of-plane CW equation:  z̈ = -n²z + fz
+This axis is DECOUPLED from x/y — it behaves as a simple harmonic
+oscillator. The agent gets an extra observation (z, vz) and an extra
+thrust axis (fz).
+
+Observation spaces:
+  2D docking         : [x, y, vx, vy, fuel]              — 5-dim
+  3D docking         : [x, y, z, vx, vy, vz, fuel]       — 7-dim
+  2D station_keeping : [x, y, vx, vy, fuel, vy_corr]     — 6-dim
+  3D station_keeping : [x, y, z, vx, vy, vz, fuel, vy_corr, vz_corr] — 9-dim
+
+Action spaces:
+  2D : [fx, fy]       — 2-dim
+  3D : [fx, fy, fz]   — 3-dim
 """
 
 from __future__ import annotations
@@ -22,17 +34,13 @@ from gymnasium import spaces
 from .dynamics import mean_motion, propagate
 
 
-# ── Constants ────────────────────────────────────────────────────────────────
-
 _TASKS = ("docking", "station_keeping")
+_MODES = ("2d", "3d")
 
-# Normalisation scales (match order in obs vector)
-_POS_SCALE  = 1_000.0   # metres   → ~[-1,1] for ±1 km initial spread
-_VEL_SCALE  = 10.0      # m/s      → ~[-1,1] for ±10 m/s
-_FUEL_SCALE = 100.0     # kg       → ~[0, 1]
+_POS_SCALE  = 1_000.0
+_VEL_SCALE  = 10.0
+_FUEL_SCALE = 100.0
 
-
-# ── Environment ───────────────────────────────────────────────────────────────
 
 class OrbitalEnv(gym.Env):
     """
@@ -40,26 +48,27 @@ class OrbitalEnv(gym.Env):
     ----------
     task : str
         "docking" or "station_keeping"
+    mode : str
+        "2d" (default) or "3d" — whether to simulate the cross-track axis
     altitude_km : float
-        Orbital altitude above Earth surface (default 400 km — LEO).
+        Orbital altitude [km] (default 400 = LEO)
     dt : float
-        Simulation timestep in seconds (default 1.0 s).
+        Simulation timestep [s] (default 1.0)
     max_steps : int
-        Episode horizon (default 1 000 steps).
+        Episode horizon (default 1 000)
     max_thrust : float
-        Maximum specific force per axis [m/s^2] (default 0.1).
+        Maximum specific force per axis [m/s²] (default 0.1)
     initial_fuel : float
-        Starting fuel mass [kg] (default 100 kg).
+        Starting fuel [kg] (default 100)
     fuel_per_thrust : float
-        Fuel consumed per unit of |thrust| per timestep [kg / (m/s^2 · s)].
+        Fuel per unit thrust per timestep [kg/(m/s²·s)]
     dock_radius : float
-        Distance threshold for a successful dock [m] (default 1.0 m).
+        Success distance threshold [m] (default 1.0)
     dock_speed : float
-        Speed threshold for a successful dock [m/s] (default 0.5 m/s).
+        Success speed threshold [m/s] (default 0.5)
     station_box : float
-        Half-width of the allowed station-keeping box [m] (default 50 m).
+        Box half-width [m] (default 50)
     render_mode : str or None
-        "human" for live Matplotlib window, None to skip.
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
@@ -67,6 +76,7 @@ class OrbitalEnv(gym.Env):
     def __init__(
         self,
         task: str = "docking",
+        mode: str = "2d",
         altitude_km: float = 400.0,
         dt: float = 1.0,
         max_steps: int = 1_000,
@@ -74,16 +84,19 @@ class OrbitalEnv(gym.Env):
         initial_fuel: float = 100.0,
         fuel_per_thrust: float = 0.05,
         dock_radius: float = 1.0,
-        dock_speed: float = 0.5,        # FIX: was 0.1 — too tight for initial training
+        dock_speed: float = 0.5,
         station_box: float = 50.0,
         render_mode: str | None = None,
     ):
         super().__init__()
 
         if task not in _TASKS:
-            raise ValueError(f"task must be one of {_TASKS}, got '{task}'")
+            raise ValueError(f"task must be one of {_TASKS}")
+        if mode not in _MODES:
+            raise ValueError(f"mode must be one of {_MODES}")
 
         self.task          = task
+        self.mode          = mode
         self.n             = mean_motion(altitude_km)
         self.dt            = dt
         self.max_steps     = max_steps
@@ -94,88 +107,93 @@ class OrbitalEnv(gym.Env):
         self.dock_speed    = dock_speed
         self.station_box   = station_box
         self.render_mode   = render_mode
+        self.is_3d         = (mode == "3d")
 
-        # ── Spaces ──────────────────────────────────────────────────────────
-        # docking obs: [x, y, vx, vy, fuel]  — 5-dim, all normalised
-        # station_keeping obs: [x, y, vx, vy, fuel, vy_correction_norm] — 6-dim
-        # vy_correction = -2*n*x is the along-track velocity needed to cancel
-        # the secular CW drift from radial offset x. Giving this to the agent
-        # as an explicit feature makes the control problem much easier to learn.
-        if task == "station_keeping":
-            obs_dim = 6
+        # ── Observation space ────────────────────────────────────────────────
+        if self.is_3d:
+            if task == "station_keeping":
+                # [x,y,z, vx,vy,vz, fuel, vy_corr, vz_corr]
+                obs_low  = np.array([-5,-5,-5, -5,-5,-5, 0, -5,-5], dtype=np.float32)
+                obs_high = np.array([ 5, 5, 5,  5, 5, 5, 1,  5, 5], dtype=np.float32)
+            else:
+                # [x,y,z, vx,vy,vz, fuel]
+                obs_low  = np.array([-5,-5,-5, -5,-5,-5, 0], dtype=np.float32)
+                obs_high = np.array([ 5, 5, 5,  5, 5, 5, 1], dtype=np.float32)
         else:
-            obs_dim = 5
+            if task == "station_keeping":
+                obs_low  = np.array([-5,-5,-5,-5, 0,-5], dtype=np.float32)
+                obs_high = np.array([ 5, 5, 5, 5, 1, 5], dtype=np.float32)
+            else:
+                obs_low  = np.array([-5,-5,-5,-5, 0], dtype=np.float32)
+                obs_high = np.array([ 5, 5, 5, 5, 1], dtype=np.float32)
 
-        obs_low  = np.array([-5]*4 + [0] + ([-5] if obs_dim == 6 else []), dtype=np.float32)
-        obs_high = np.array([ 5]*4 + [1] + ([ 5] if obs_dim == 6 else []), dtype=np.float32)
         self.observation_space = spaces.Box(low=obs_low, high=obs_high)
 
-        # action: [fx, fy] in [-1, 1], scaled internally by max_thrust
+        # ── Action space ─────────────────────────────────────────────────────
+        n_act = 3 if self.is_3d else 2
         self.action_space = spaces.Box(
-            low  = np.full(2, -1.0, dtype=np.float32),
-            high = np.full(2,  1.0, dtype=np.float32),
+            low  = np.full(n_act, -1.0, dtype=np.float32),
+            high = np.full(n_act,  1.0, dtype=np.float32),
         )
 
-        # ── Rendering state ──────────────────────────────────────────────────
         self._fig = None
         self._trajectory: list[np.ndarray] = []
 
-    # ── Core API ─────────────────────────────────────────────────────────────
+    # ── Core API ──────────────────────────────────────────────────────────────
 
-    def reset(
-        self,
-        *,
-        seed: int | None = None,
-        options: dict | None = None,
-    ):
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
 
         if self.task == "docking":
-            # Start anywhere in ±1 km — agent must navigate from far away
             pos = self.np_random.uniform(-1_000, 1_000, size=2)
             vel = self.np_random.uniform(   -2.0,   2.0, size=2)
+            if self.is_3d:
+                z   = self.np_random.uniform(-200, 200)
+                vz  = self.np_random.uniform( -1.0,  1.0)
+                self._state = np.array([pos[0], pos[1], z,
+                                        vel[0], vel[1], vz], dtype=np.float64)
+            else:
+                self._state = np.array([pos[0], pos[1], vel[0], vel[1]], dtype=np.float64)
 
         else:  # station_keeping
-            # Start INSIDE the box, well away from the edges, with near-zero
-            # velocity. This guarantees the agent sees positive reward from
-            # step 1, giving it a clear signal to learn from.
-            #
-            # Why not start at the edges? CW secular drift rate = 6*n*x.
-            # At x = station_box (50 m), drift = 0.34 m/s — the agent drifts
-            # out in ~150 steps before learning anything. Starting at 0.3×
-            # box width gives ~400+ steps of positive reward to learn from.
-            inner = self.station_box * 0.3   # ±15 m for default 50 m box
+            inner = self.station_box * 0.3
             pos = self.np_random.uniform(-inner, inner, size=2)
-            vel = self.np_random.uniform(-0.1, 0.1, size=2)  # near-stationary
+            vel = self.np_random.uniform(-0.1, 0.1, size=2)
+            if self.is_3d:
+                z   = self.np_random.uniform(-inner, inner)
+                vz  = self.np_random.uniform(-0.05, 0.05)
+                self._state = np.array([pos[0], pos[1], z,
+                                        vel[0], vel[1], vz], dtype=np.float64)
+            else:
+                self._state = np.array([pos[0], pos[1], vel[0], vel[1]], dtype=np.float64)
 
-        self._state = np.array([pos[0], pos[1], vel[0], vel[1]], dtype=np.float64)
         self._fuel  = float(self.initial_fuel)
         self._steps = 0
         self._trajectory = [self._state[:2].copy()]
-
         return self._get_obs(), {}
 
     def step(self, action: np.ndarray):
         action = np.clip(action, -1.0, 1.0)
-        force  = action * self.max_thrust                   # [m/s^2]
 
-        # Fuel cost proportional to |thrust|
-        thrust_magnitude  = float(np.linalg.norm(force))
-        fuel_used         = self.fuel_per_unit * thrust_magnitude * self.dt
-        self._fuel        = max(0.0, self._fuel - fuel_used)
+        if self.is_3d:
+            force = action * self.max_thrust          # shape (3,)
+        else:
+            force = action * self.max_thrust          # shape (2,)
 
-        # Zero force if out of fuel
+        thrust_magnitude = float(np.linalg.norm(force))
+        fuel_used        = self.fuel_per_unit * thrust_magnitude * self.dt
+        self._fuel       = max(0.0, self._fuel - fuel_used)
+
         if self._fuel <= 0.0:
-            force = np.zeros(2)
+            force = np.zeros_like(force)
 
-        # Propagate physics
         self._state = propagate(self._state, self.n, force, self.dt)
         self._steps += 1
         self._trajectory.append(self._state[:2].copy())
 
-        obs      = self._get_obs()
-        reward   = self._compute_reward(force)
-        done, truncated, info = self._check_terminal()
+        obs                    = self._get_obs()
+        reward                 = self._compute_reward(force)
+        done, truncated, info  = self._check_terminal()
 
         if self.render_mode == "human":
             self.render()
@@ -185,97 +203,90 @@ class OrbitalEnv(gym.Env):
     # ── Internals ─────────────────────────────────────────────────────────────
 
     def _get_obs(self) -> np.ndarray:
-        x, y, vx, vy = self._state
-        obs = [
-            x  / _POS_SCALE,
-            y  / _POS_SCALE,
-            vx / _VEL_SCALE,
-            vy / _VEL_SCALE,
-            self._fuel / _FUEL_SCALE,
-        ]
-        if self.task == "station_keeping":
-            # CW drift cancellation hint: the along-track velocity the agent
-            # should target to cancel secular drift from radial offset x.
-            # vy_correction = -2*n*x (from CW periodic orbit condition)
-            vy_correction = -2.0 * self.n * x
-            obs.append(vy_correction / _VEL_SCALE)
+        if self.is_3d:
+            x, y, z, vx, vy, vz = self._state
+            obs = [x/_POS_SCALE, y/_POS_SCALE, z/_POS_SCALE,
+                   vx/_VEL_SCALE, vy/_VEL_SCALE, vz/_VEL_SCALE,
+                   self._fuel/_FUEL_SCALE]
+            if self.task == "station_keeping":
+                obs.append(-2.0 * self.n * x / _VEL_SCALE)  # vy correction
+                obs.append(0.0)                               # vz correction = 0 (z is harmonic)
+        else:
+            x, y, vx, vy = self._state
+            obs = [x/_POS_SCALE, y/_POS_SCALE,
+                   vx/_VEL_SCALE, vy/_VEL_SCALE,
+                   self._fuel/_FUEL_SCALE]
+            if self.task == "station_keeping":
+                obs.append(-2.0 * self.n * x / _VEL_SCALE)
+
         return np.array(obs, dtype=np.float32)
 
+    def _get_pos_vel(self):
+        """Return (position_3d, velocity_3d) regardless of mode."""
+        if self.is_3d:
+            x, y, z, vx, vy, vz = self._state
+        else:
+            x, y, vx, vy = self._state
+            z = vz = 0.0
+        return np.array([x, y, z]), np.array([vx, vy, vz])
+
     def _compute_reward(self, force: np.ndarray) -> float:
-        x, y, vx, vy = self._state
-        dist  = np.sqrt(x**2 + y**2)
-        speed = np.sqrt(vx**2 + vy**2)
+        pos, vel = self._get_pos_vel()
+        dist  = float(np.linalg.norm(pos))
+        speed = float(np.linalg.norm(vel))
 
         if self.task == "docking":
-            # 1. Distance penalty — always drives agent closer
-            reward = -dist / _POS_SCALE
-
-            # 2. Proximity bonus: 1/(d + eps) gives a pole at the origin.
-            #    Continuous and monotone at ALL distances — no transition
-            #    discontinuity. The gradient doubles every time distance halves,
-            #    so the agent is always pulled forward, never satisfied hovering.
+            reward  = -dist / _POS_SCALE
             reward += 0.5 / (dist + 0.5)
-
-            # 3. Speed bonus inside 50 m: reward slow approach, additive only.
-            #    max(0, ...) ensures this never penalises the agent.
             if dist < 50.0:
                 reward += 0.3 * max(0.0, 1.0 - speed / self.dock_speed)
-
-            # 4. Terminal dock bonus: large one-time reward on success.
-            #    This makes docking worth more than any amount of hovering.
-            #    Checked here so it appears in the step reward, not just info.
             if dist < self.dock_radius and speed < self.dock_speed:
                 reward += 500.0
-
-            # 5. Small fuel penalty — discourages wasteful burns
             reward -= 0.005 * float(np.linalg.norm(force)) / self.max_thrust
 
         else:  # station_keeping
-            half = self.station_box
-            in_box = (abs(x) < half) and (abs(y) < half)
+            if self.is_3d:
+                x, y, z = pos
+                in_box = (abs(x) < self.station_box and
+                          abs(y) < self.station_box and
+                          abs(z) < self.station_box)
+            else:
+                x, y = pos[0], pos[1]
+                in_box = abs(x) < self.station_box and abs(y) < self.station_box
 
             if in_box:
-                # Reward for being inside — bonus for being near centre
-                centre_dist = np.sqrt(x**2 + y**2)
-                reward = 1.0 + 0.5 * (1.0 - centre_dist / half)
+                reward = 1.0 + 0.5 * (1.0 - dist / self.station_box)
             else:
-                # Shaped penalty: closer to the box = less negative
-                # Distance to nearest box edge (not centre)
-                dx = max(0.0, abs(x) - half)
-                dy = max(0.0, abs(y) - half)
-                edge_dist = np.sqrt(dx**2 + dy**2)
-                reward = -1.0 - edge_dist / (half * 2.0)
+                dx = max(0.0, abs(pos[0]) - self.station_box)
+                dy = max(0.0, abs(pos[1]) - self.station_box)
+                dz = max(0.0, abs(pos[2]) - self.station_box) if self.is_3d else 0.0
+                edge_dist = np.sqrt(dx**2 + dy**2 + dz**2)
+                reward = -1.0 - edge_dist / (self.station_box * 2.0)
 
-            # Fuel penalty
             reward -= 0.005 * float(np.linalg.norm(force)) / self.max_thrust
 
         return float(reward)
 
     def _check_terminal(self):
-        x, y, vx, vy = self._state
-        dist  = np.sqrt(x**2 + y**2)
-        speed = np.sqrt(vx**2 + vy**2)
-        info  = {"distance": dist, "speed": speed, "fuel": self._fuel, "steps": self._steps}
+        pos, vel = self._get_pos_vel()
+        dist  = float(np.linalg.norm(pos))
+        speed = float(np.linalg.norm(vel))
+        info  = {"distance": dist, "speed": speed,
+                 "fuel": self._fuel, "steps": self._steps}
 
-        # Successful dock
         if self.task == "docking" and dist < self.dock_radius and speed < self.dock_speed:
             info["outcome"] = "docked"
             return True, False, info
 
-        # Crash (high-speed collision within dock radius)
         if self.task == "docking" and dist < self.dock_radius and speed >= self.dock_speed:
             info["outcome"] = "crash"
             return True, False, info
 
-        # Runaway — too far from target (task-specific thresholds)
-        # station_keeping uses 4× box: tight enough to terminate fast,
-        # generous enough that the agent can recover from small excursions
         runaway_limit = 5_000.0 if self.task == "docking" else self.station_box * 4.0
         if dist > runaway_limit:
             info["outcome"] = "runaway"
             return True, False, info
 
-        # Timeout
         if self._steps >= self.max_steps:
             info["outcome"] = "timeout"
             return False, True, info
@@ -302,16 +313,16 @@ class OrbitalEnv(gym.Env):
 
         if self.task == "station_keeping":
             b = self.station_box
-            rect = plt.Rectangle((-b, -b), 2*b, 2*b,
-                                  linewidth=1, edgecolor="lime",
-                                  facecolor="lime", alpha=0.05)
+            rect = plt.Rectangle((-b, -b), 2*b, 2*b, linewidth=1,
+                                  edgecolor="lime", facecolor="lime", alpha=0.05)
             ax.add_patch(rect)
 
         ax.set_xlim(-1_200, 1_200)
         ax.set_ylim(-1_200, 1_200)
         ax.set_xlabel("Along-track y [m]")
         ax.set_ylabel("Radial x [m]")
-        ax.set_title(f"Task: {self.task} | Step {self._steps} | Fuel: {self._fuel:.1f} kg")
+        mode_str = "3D" if self.is_3d else "2D"
+        ax.set_title(f"{mode_str} {self.task} | Step {self._steps} | Fuel: {self._fuel:.1f} kg")
         ax.legend(loc="upper right", fontsize=7)
         ax.set_facecolor("#0a0a12")
         self._fig.patch.set_facecolor("#0a0a12")
@@ -319,7 +330,6 @@ class OrbitalEnv(gym.Env):
         ax.xaxis.label.set_color("white")
         ax.yaxis.label.set_color("white")
         ax.title.set_color("white")
-
         plt.pause(0.001)
         plt.draw()
 

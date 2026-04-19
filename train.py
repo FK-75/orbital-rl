@@ -27,6 +27,8 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--task",       default="docking",
                    choices=["docking", "station_keeping"])
+    p.add_argument("--mode",       default="2d", choices=["2d", "3d"],
+                   help="2d (default) or 3d — whether to include cross-track axis")
     p.add_argument("--timesteps",  type=int, default=1_000_000)
     p.add_argument("--n_envs",     type=int, default=8)
     p.add_argument("--altitude",   type=float, default=400.0)
@@ -41,8 +43,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    model_dir = Path("models") / args.task
-    log_dir   = Path("logs")   / args.task
+    model_dir = Path("models") / f"{args.task}_{args.mode}"
+    log_dir   = Path("logs")   / f"{args.task}_{args.mode}"
     model_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -57,7 +59,7 @@ def main():
         log_dir.mkdir(parents=True, exist_ok=True)
 
     def make_env():
-        return Monitor(OrbitalEnv(task=args.task, altitude_km=args.altitude))
+        return Monitor(OrbitalEnv(task=args.task, mode=args.mode, altitude_km=args.altitude))
 
     train_env = make_vec_env(make_env, n_envs=args.n_envs)
     eval_env  = make_vec_env(make_env, n_envs=1)
@@ -109,6 +111,7 @@ def main():
     base_env = train_env.envs[0].unwrapped
     print(f"\n{'='*60}")
     print(f"  Task         : {args.task}")
+    print(f"  Mode         : {args.mode}")
     print(f"  Altitude     : {args.altitude} km  (n = {base_env.n:.6f} rad/s)")
     print(f"  Device       : {model.device}")
     print(f"  Timesteps    : {args.timesteps:,}")
@@ -124,10 +127,10 @@ def main():
         reset_num_timesteps = args.resume is None,
     )
 
-    final_path = model_dir / f"ppo_{args.task}_final"
+    final_path = model_dir / f"ppo_{args.task}_{args.mode}_final"
     model.save(str(final_path))
     print(f"\n✓ Saved → {final_path}.zip")
-    print(f"  Run: python enjoy.py --task {args.task}\n")
+    print(f"  Run: python enjoy.py --task {args.task} --mode {args.mode}\n")
 
 
 if __name__ == "__main__":

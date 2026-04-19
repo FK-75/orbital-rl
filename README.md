@@ -5,22 +5,33 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)
 ![Gymnasium](https://img.shields.io/badge/Gymnasium-0.29-orange)
 ![Stable Baselines3](https://img.shields.io/badge/SB3-PPO-green)
+![Tests](https://img.shields.io/badge/Tests-31%20passed-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
 ---
 
-![Docking Demo](assets/docking_demo.gif)
+| 2D Docking | 2D Station-Keeping |
+|:---:|:---:|
+| ![Docking 2D](assets/docking_2d_ep1.gif) | ![Station Keeping 2D](assets/station_keeping_2d_ep1.gif) |
+| **100% success rate** | **100% success rate** |
+
+| 3D Docking | 3D Station-Keeping |
+|:---:|:---:|
+| ![Docking 3D](assets/docking_3d_ep1.gif) | ![Station Keeping 3D](assets/station_keeping_3d_ep1.gif) |
+| **99% success rate** | **100% success rate** |
+
+---
 
 ## What is this?
 
-This project trains a neural network agent to solve two spacecraft control problems using real orbital mechanics:
+A PPO agent trained to solve two spacecraft control problems from scratch using real orbital mechanics, in both 2D (in-plane) and full 3D:
 
-| Task | Goal |
-|---|---|
-| **Docking** | Navigate a chaser from a random position (±1 km) to dock within 1 m at < 0.5 m/s |
-| **Station Keeping** | Hold position inside a 50 m orbital box while minimising ΔV |
+| Task | Goal | 2D Result | 3D Result |
+|---|---|---|---|
+| **Docking** | Navigate from ±1 km and dock within 1 m at < 0.5 m/s | **100% success** | **99% success** |
+| **Station Keeping** | Hold position inside a 50 m orbital box for 1000 steps | **100% success, 0.10 m from centre** | **100% success, 0.27 m from centre** |
 
-Both tasks are simulated in **Hill's Frame (LVLH)** using the **Clohessy-Wiltshire (CW) equations** — the standard linearisation for relative orbital motion used in real mission design. The agent is trained with **PPO** (Proximal Policy Optimization) via Stable Baselines 3.
+Both tasks are simulated in **Hill's Frame (LVLH)** using the **Clohessy-Wiltshire (CW) equations** — the standard linearisation for relative orbital motion used in real mission design. The agent observes position, velocity, and fuel; it outputs continuous thrust commands on two or three axes.
 
 ---
 
@@ -28,20 +39,22 @@ Both tasks are simulated in **Hill's Frame (LVLH)** using the **Clohessy-Wiltshi
 
 ### Clohessy-Wiltshire Equations
 
-For a chaser in near-circular orbit relative to a target, the relative equations of motion are:
+For a chaser in near-circular orbit relative to a target, the full 3D relative equations of motion are:
 
+**In-plane (coupled via Coriolis):**
 $$\ddot{x} = 3n^2 x + 2n\dot{y} + f_x$$
 $$\ddot{y} = -2n\dot{x} + f_y$$
 
+**Out-of-plane (decoupled harmonic oscillator):**
+$$\ddot{z} = -n^2 z + f_z$$
+
 Where:
-- $(x, y)$ — radial and along-track position relative to the target
+- $(x, y, z)$ — radial, along-track, and cross-track position relative to the target
 - $n = \sqrt{\mu / a^3}$ — mean motion of the reference orbit
 - $\mu = 3.986 \times 10^{14}\ \text{m}^3/\text{s}^2$ — Earth's gravitational parameter
-- $f_x, f_y$ — specific thrust force (acceleration) per axis
+- $f_x, f_y, f_z$ — specific thrust force per axis
 
-Note: free drift from a radial offset produces a secular along-track drift — this is physically correct CW behaviour, not an integration error.
-
-Integrated numerically via **sub-stepped Runge-Kutta 4** (10 substeps per environment step).
+The z-axis is **fully decoupled** from the x-y dynamics — a key property that makes 3D control tractable. Integrated via **sub-stepped Runge-Kutta 4** (10 substeps per environment step).
 
 ### Reference Orbit
 
@@ -59,30 +72,25 @@ Integrated numerically via **sub-stepped Runge-Kutta 4** (10 substeps per enviro
 ```
 orbital-rl/
 ├── envs/
-│   ├── __init__.py
-│   ├── dynamics.py          # CW equations + RK4 propagator
-│   └── orbital_env.py       # Gymnasium environment (docking & station-keeping)
+│   ├── dynamics.py              # Full 3D CW equations + RK4 propagator
+│   └── orbital_env.py           # Gymnasium environment (both tasks, 2D/3D)
 ├── scripts/
-│   └── validate_physics.py  # Physics sanity checks — run before training
+│   ├── validate_physics.py      # Physics sanity checks — run before training
+│   └── plot_comparison.py       # Side-by-side training comparison plot
 ├── tests/
-│   └── test_dynamics.py     # Unit tests for propagator and environment
+│   └── test_dynamics.py         # 31 unit tests (physics + environment + 3D)
 ├── notebooks/
-│   └── demo.ipynb           # Interactive walkthrough
+│   └── demo.ipynb               # Interactive walkthrough
 ├── models/
-│   └── docking/
-│       └── best/
-│           └── .gitkeep     # Placeholder only; trained weights are gitignored
-├── assets/
-│   ├── docking_demo.gif
-│   ├── learning_curve_docking.png
-│   └── learning_curve_station_keeping.png
-├── train.py
-├── enjoy.py
-├── evaluate.py
-├── requirements.txt
-├── .gitignore
-├── LICENSE
-└── README.md
+│   ├── docking_2d/best/         # Trained 2D docking agent   (100% success)
+│   ├── docking_3d/best/         # Trained 3D docking agent   ( 99% success)
+│   ├── station_keeping_2d/best/ # Trained 2D station-keeping (100% success)
+│   └── station_keeping_3d/best/ # Trained 3D station-keeping (100% success)
+├── assets/                      # GIFs, learning curves, comparison plots
+├── train.py                     # Training entry point
+├── enjoy.py                     # Watch a trained agent fly + save GIFs
+├── evaluate.py                  # Benchmark agents, generate learning curves
+└── play.py                      # Human-playable keyboard docking
 ```
 
 ---
@@ -90,30 +98,25 @@ orbital-rl/
 ## Quickstart
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/YOUR_USERNAME/orbital-rl.git
+git clone https://github.com/FK-75/orbital-rl.git
 cd orbital-rl
 pip install -r requirements.txt
 
-# 2. Validate the physics (always do this first)
+# Validate the physics before anything else
 python scripts/validate_physics.py
 
-# 3. Run the test suite
+# Run the test suite
 pytest tests/ -v
 
-# 4. Train
-python train.py --task docking --timesteps 2000000
-python train.py --task station_keeping --timesteps 1000000
+# Watch the trained agents
+python enjoy.py --task docking --mode 2d
+python enjoy.py --task docking --mode 3d
+python enjoy.py --task station_keeping --mode 2d
+python enjoy.py --task station_keeping --mode 3d
 
-# 5. Watch the trained agent
-python enjoy.py --task docking
-
-# 6. Save a demo GIF
-python enjoy.py --task docking --save_gif
-
-# 7. Benchmark and generate learning curve
-python evaluate.py --task docking --episodes 100
-python evaluate.py --task docking --curve
+# Try docking yourself — arrow keys to thrust, R to reset, Q to quit
+python play.py --mode 2d
+python play.py --mode 3d
 ```
 
 ---
@@ -121,14 +124,16 @@ python evaluate.py --task docking --curve
 ## Training
 
 ```bash
-# Docking — 2M steps recommended for reliable docking
-python train.py --task docking --timesteps 2000000 --n_envs 8
+# 2D training
+python train.py --task docking         --mode 2d --timesteps 3000000 --n_envs 8 --device cpu
+python train.py --task station_keeping --mode 2d --timesteps 1000000 --n_envs 8 --device cpu
 
-# Station-keeping — converges faster
-python train.py --task station_keeping --timesteps 1000000 --n_envs 8
+# 3D training
+python train.py --task docking         --mode 3d --timesteps 3000000 --n_envs 8 --device cpu
+python train.py --task station_keeping --mode 3d --timesteps 1000000 --n_envs 8 --device cpu
 
 # Resume from a checkpoint
-python train.py --task docking --resume models/docking/best/best_model.zip --timesteps 1000000
+python train.py --task docking --mode 2d --resume models/docking_2d/best/best_model.zip --timesteps 2000000
 
 # Monitor live
 tensorboard --logdir logs/
@@ -143,8 +148,8 @@ tensorboard --logdir logs/
 | Batch size | 256 | Stable gradient estimates |
 | Epochs per update | 10 | Sufficient reuse without divergence |
 | Discount γ | 0.99 | Long-horizon task |
-| Entropy coeff | 0.005 | Mild exploration pressure |
-| Policy network | MLP [256, 256] | Sufficient for 5-dim obs |
+| Entropy coefficient | 0.005 | Mild exploration pressure |
+| Policy network | MLP [256, 256] | Sufficient for low-dim obs |
 
 ---
 
@@ -152,23 +157,25 @@ tensorboard --logdir logs/
 
 **Observation space:**
 
-| Index | Variable | Scale | Tasks |
-|---|---|---|---|
-| 0 | Radial position $x$ | ÷ 1000 m | Both |
-| 1 | Along-track position $y$ | ÷ 1000 m | Both |
-| 2 | Radial velocity $\dot{x}$ | ÷ 10 m/s | Both |
-| 3 | Along-track velocity $\dot{y}$ | ÷ 10 m/s | Both |
-| 4 | Remaining fuel | ÷ 100 kg | Both |
-| 5 | CW drift correction $-2nx$ | ÷ 10 m/s | Station-keeping only |
+| Index | Variable | Scale | 2D Docking | 3D Docking | 2D SK | 3D SK |
+|---|---|---|:---:|:---:|:---:|:---:|
+| 0 | Radial position $x$ | ÷ 1000 m | ✓ | ✓ | ✓ | ✓ |
+| 1 | Along-track position $y$ | ÷ 1000 m | ✓ | ✓ | ✓ | ✓ |
+| 2 | Cross-track position $z$ | ÷ 1000 m | — | ✓ | — | ✓ |
+| 3 | Radial velocity $\dot{x}$ | ÷ 10 m/s | ✓ | ✓ | ✓ | ✓ |
+| 4 | Along-track velocity $\dot{y}$ | ÷ 10 m/s | ✓ | ✓ | ✓ | ✓ |
+| 5 | Cross-track velocity $\dot{z}$ | ÷ 10 m/s | — | ✓ | — | ✓ |
+| — | Remaining fuel | ÷ 100 kg | ✓ | ✓ | ✓ | ✓ |
+| — | CW drift correction $-2nx$ | ÷ 10 m/s | — | — | ✓ | ✓ |
 
-The drift correction feature (index 5) gives the agent the along-track velocity it needs to cancel the secular CW drift from its current radial offset. Without it, the agent must discover this relationship from scratch; with it, the control problem becomes tractable within 1M steps.
+The drift correction feature encodes the along-track velocity required to cancel the secular CW drift from the current radial offset — making station-keeping tractable without requiring the agent to rediscover Keplerian mechanics from scratch.
 
-**Action** (2-dimensional, continuous in [-1, 1]):
+**Action space** (continuous):
 
-| Index | Axis | Physical range |
+| Mode | Axes | Dimensions |
 |---|---|---|
-| 0 | Radial thrust $f_x$ | [-0.1, +0.1] m/s² |
-| 1 | Along-track thrust $f_y$ | [-0.1, +0.1] m/s² |
+| 2D | $[f_x, f_y]$ | 2, each in [−0.1, +0.1] m/s² |
+| 3D | $[f_x, f_y, f_z]$ | 3, each in [−0.1, +0.1] m/s² |
 
 ---
 
@@ -176,92 +183,82 @@ The drift correction feature (index 5) gives the agent the along-track velocity 
 
 ### Docking
 
-The reward function provides a monotone gradient at every distance — the agent is always pulled forward, with no hovering equilibrium:
-
 | Signal | Value | Purpose |
 |---|---|---|
-| Distance penalty | $-d / 1000$ per step | Constant pull toward target |
-| Proximity bonus | $+0.5 / (d + 0.5)$ per step | Steepens near target — gradient doubles each time distance halves |
+| Distance penalty | $-d / 1000$ per step | Constant pull toward target at all ranges |
+| Proximity bonus | $+0.5 / (d + 0.5)$ per step | Gradient steepens near target — doubles each time $d$ halves |
 | Speed bonus | $+0.3 \cdot \max(0, 1 - v/v_{dock})$ when $d < 50$ m | Rewards gentle final approach |
 | Terminal dock bonus | $+500$ on success | Makes docking worth more than any amount of hovering |
 | Fuel penalty | $-0.005 \|\mathbf{f}\| / f_{max}$ | Discourages wasteful burns |
 
-The $1/(d + \varepsilon)$ shaping is the key design choice: unlike exponential shaping, it has no inflection point where the gradient becomes negligible. An agent at 3 m always sees a larger marginal reward for moving to 2 m than it saw for moving from 4 m to 3 m.
+The $1/(d + \varepsilon)$ shaping has no inflection point — unlike exponential shaping, the gradient never becomes negligible, so no hovering equilibrium exists at any distance.
 
 ### Station Keeping
 
-| Signal | Value |
-|---|---|
-| In-box reward | +1.0 per step |
-| Out-of-box penalty | −1.0 per step |
-| Fuel penalty | −0.005 per unit thrust |
+| Signal | Value | Purpose |
+|---|---|---|
+| In-box reward | $+1.0 + 0.5(1 - r/r_{box})$ per step | Rewards being inside; bonus for staying near centre |
+| Out-of-box penalty | $-1.0 - d_{edge}/(2 \cdot r_{box})$ per step | Shaped gradient pulls agent back toward box |
+| Fuel penalty | $-0.005 \|\mathbf{f}\| / f_{max}$ | Discourages wasteful burns |
 
 ---
 
 ## Results
 
-### Docking Learning Curve
+### Training Comparison (2D)
 
-![Learning Curve](assets/learning_curve_docking.png)
+![Training Comparison 2D](assets/comparison_2d.png)
 
-The agent transitions through three clear phases:
+### Training Comparison (3D)
 
-| Phase | Timesteps | Behaviour |
-|---|---|---|
-| Exploration | 0 – 200k | Random, high-variance trajectories |
-| Rapid learning | 200k – 1M | Agent discovers approach strategy, reward climbs sharply |
-| Refinement | 1M – 3M | High-variance oscillation as agent improves precision; best checkpoint emerges at 3M steps |
+![Training Comparison 3D](assets/comparison_3d.png)
 
-Best checkpoint: **+496 mean reward at 3.0M steps**.
+The plots show contrasting learning dynamics: docking requires a slow noisy climb over millions of steps, while station-keeping converges via a sharp cliff when the agent discovers the drift correction strategy.
 
-### Docking Evaluation (100 episodes, best model)
+### Final Evaluation — All Four Models
 
-```
-  Mean reward     : +475.6 ± 69.9
-  Docking success :  99.0%
-  Mean final dist :   0.99 m
-  Mean final speed:   0.046 m/s
-  Mean fuel left  :  99.0 kg
+| Task | Mode | Success | Mean Reward | Mean Final Dist | Mean Speed | Fuel Left |
+|---|---|---|---|---|---|---|
+| Docking | 2D | **100%** | +517.4 ± 40.7 | 0.99 m | 0.011 m/s | 99.4 kg |
+| Docking | 3D | **99%** | +576.0 ± 72.9 | 1.00 m | 0.007 m/s | 99.4 kg |
+| Station-keeping | 2D | **100%** | +1497.3 ± 0.7 | 0.10 m | 0.000 m/s | 99.9 kg |
+| Station-keeping | 3D | **100%** | +1495.1 ± 0.9 | 0.27 m | 0.000 m/s | 99.9 kg |
 
-  Outcomes:
-    docked      :   99  ( 99.0%)
-    crash       :    1  (  1.0%)
-```
+Station-keeping theoretical maximum is +1500. Both agents score >99.7% of this. The 3D docking agent arrives with a *lower* mean speed than 2D (0.007 vs 0.011 m/s) — the additional z-axis provided early easy wins that improved the value function, leading to a more cautious final approach.
 
-The agent docks reliably from random starting positions up to ±1 km, approaching at well under the 0.5 m/s threshold and consuming almost no fuel. The `1/(d + ε)` proximity shaping is the key design choice that keeps a strong gradient all the way to the dock radius — see the Reward Design section for details.
+### Learning Curve Highlights
 
-### Station-Keeping Learning Curve
+| Task | Mode | Best checkpoint | Convergence |
+|---|---|---|---|
+| Docking | 2D | +516 @ 1.25M steps | ~3M steps for stable success |
+| Docking | 3D | +567 @ 0.85M steps | ~3M steps for stable success |
+| Station-keeping | 2D | +1497 @ 0.75M steps | ~350k steps — sharp cliff |
+| Station-keeping | 3D | +1495 @ 1.00M steps | ~550k steps — sharp cliff |
 
-![Learning Curve](assets/learning_curve_station_keeping.png)
+---
 
-Station-keeping shows a sharp phase transition at ~300k steps — the agent abruptly learns to cancel the CW secular drift using the provided drift-correction observation feature, then refines to near-perfect performance.
+## Reward Engineering Notes
 
-Best checkpoint: **+1498 mean reward at 650k steps**.
+Getting all four agents to train required several non-obvious design decisions documented here for reproducibility:
 
-### Station-Keeping Evaluation (100 episodes, best model)
+**Docking — the hovering problem.** An exponential shaping term `exp(-d/20)` plateaus near the target, giving the agent almost no gradient for the last few metres. The agent learned to hover at ~3 m indefinitely — reward was nearly identical at 3 m and 1 m. Replacing it with `1/(d + 0.5)` ensures the gradient always increases as the agent gets closer. A +500 terminal bonus makes docking worth more than hovering for any number of steps.
 
-```
-  Mean reward     : +1498.0 ± 0.8
-  Mean final dist :    0.02 m
-  Mean final speed:   0.000 m/s
-  Mean fuel left  :  99.9 kg
+**Station-keeping — the initialisation problem.** With a 50 m box and random starts up to ±1 km, only 0.26% of episodes started inside the box. The agent never encountered positive reward and produced 100% runaways across 1M steps. Restricting resets to within 0.3× the box width (±15 m) gave immediate positive signal from step 1.
 
-  Outcomes:
-    timeout     :  100  (100.0%)  ← all episodes run to completion
-```
-
-The agent holds position at 0.02 m from the box centre for the full 1000-step horizon with near-zero corrective thrust. The `timeout` outcome means the agent never left the box — there is no failure termination condition in station-keeping.
+**Station-keeping — the drift hint.** The CW secular drift (`y(t) = -6nx₀t`) requires a specific velocity correction (`vy = -2nx`) to cancel. Without this, the agent failed across 1M steps. Adding `−2nx` as an explicit observation feature produced convergence at ~350k steps (2D) and ~550k steps (3D).
 
 ---
 
 ## Scripts Reference
 
-| Script | Purpose |
+| Script | Description |
 |---|---|
-| `train.py` | Train PPO agent, saves checkpoints and best model |
-| `enjoy.py` | Load model and watch it fly, optionally save GIF |
-| `evaluate.py` | Benchmark model over N episodes, generate learning curves |
-| `scripts/validate_physics.py` | Sanity-check CW propagator before training |
+| `train.py` | Train PPO — `--task`, `--mode 2d/3d`, `--timesteps`, `--resume`, `--fresh` |
+| `enjoy.py` | Watch trained agent, save GIFs — `--task`, `--mode`, `--save_gif` |
+| `evaluate.py` | Benchmark model, generate learning curves — `--task`, `--mode`, `--curve` |
+| `play.py` | Human-playable keyboard control — `--task`, `--mode` |
+| `scripts/validate_physics.py` | CW propagator sanity checks with plots |
+| `scripts/plot_comparison.py` | Side-by-side training comparison plot |
 
 ---
 

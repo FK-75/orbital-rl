@@ -23,6 +23,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--task",     default="docking",
                    choices=["docking", "station_keeping"])
+    p.add_argument("--mode",     default="2d", choices=["2d", "3d"])
     p.add_argument("--episodes", type=int, default=3)
     p.add_argument("--model",    default=None,
                    help="Path to .zip model (auto-detects best model if omitted)")
@@ -31,8 +32,11 @@ def parse_args():
     return p.parse_args()
 
 
-def find_model(task: str) -> str:
+def find_model(task: str, mode: str) -> str:
     candidates = [
+        Path("models") / f"{task}_{mode}" / "best" / "best_model.zip",
+        Path("models") / f"{task}_{mode}" / f"ppo_{task}_{mode}_final.zip",
+        # Fall back to legacy paths (2D models trained before mode flag)
         Path("models") / task / "best" / "best_model.zip",
         Path("models") / task / f"ppo_{task}_final.zip",
     ]
@@ -40,8 +44,8 @@ def find_model(task: str) -> str:
         if p.exists():
             return str(p)
     raise FileNotFoundError(
-        f"No trained model found for task '{task}'.\n"
-        f"Run: python train.py --task {task}"
+        f"No trained model found for task='{task}' mode='{mode}'.\n"
+        f"Run: python train.py --task {task} --mode {mode}"
     )
 
 
@@ -77,9 +81,16 @@ def _render_frame(env: OrbitalEnv) -> np.ndarray:
         color="white", fontsize=8
     )
     fig.canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
-    img = img[:, :, :3]  # drop alpha → RGB
+    buf = fig.canvas.buffer_rgba()
+    img = np.frombuffer(buf, dtype=np.uint8)
+    # Derive actual pixel dimensions from buffer size (handles Retina 2× displays)
+    n_pixels = len(img) // 4
+    w_buf, h_buf = fig.canvas.get_width_height()
+    # On Retina screens get_width_height() returns logical points, not pixels
+    # Infer true pixel width from total buffer size
+    true_w = int(np.sqrt(n_pixels * w_buf / h_buf))
+    true_h = n_pixels // true_w
+    img = img.reshape(true_h, true_w, 4)[:, :, :3]  # drop alpha → RGB
     plt.close(fig)
     return img
 
@@ -110,11 +121,11 @@ def run_episode(env, model, save_gif_flag: bool):
 
 def main():
     args  = parse_args()
-    mpath = args.model or find_model(args.task)
+    mpath = args.model or find_model(args.task, args.mode)
 
     print(f"\nLoading: {mpath}")
     model = PPO.load(mpath)
-    env   = OrbitalEnv(task=args.task, render_mode="human")
+    env   = OrbitalEnv(task=args.task, mode=args.mode, render_mode="human")
     Path("assets").mkdir(exist_ok=True)
 
     outcomes = {"docked": 0, "crash": 0, "runaway": 0, "timeout": 0}
@@ -129,7 +140,7 @@ def main():
               f"fuel={info['fuel']:.1f} kg")
 
         if args.save_gif and frames:
-            save_gif(frames, f"assets/{args.task}_ep{ep}.gif")
+            save_gif(frames, f"assets/{args.task}_{args.mode}_ep{ep}.gif")
 
     env.close()
 

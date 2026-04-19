@@ -31,6 +31,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--task",     default="docking",
                    choices=["docking", "station_keeping"])
+    # ADDED MODE HERE
+    p.add_argument("--mode",     default="2d", choices=["2d", "3d"],
+                   help="2d or 3d mode")
     p.add_argument("--episodes", type=int, default=100,
                    help="Number of evaluation episodes per model")
     p.add_argument("--curve",    action="store_true",
@@ -42,9 +45,10 @@ def parse_args():
 
 # ── Single model evaluation ───────────────────────────────────────────────────
 
-def evaluate_model(model_path: str, task: str, n_episodes: int) -> dict:
+def evaluate_model(model_path: str, task: str, mode: str, n_episodes: int) -> dict:
     model = PPO.load(model_path)
-    env   = OrbitalEnv(task=task)
+    # PASS THE MODE HERE
+    env   = OrbitalEnv(task=task, mode=mode)
 
     rewards, distances, speeds, fuels, outcomes = [], [], [], [], []
 
@@ -183,24 +187,29 @@ def main():
     Path("assets").mkdir(exist_ok=True)
 
     if args.curve:
-        plot_learning_curve(args.task)
+        # Update plot path to look in the mode-specific log folder
+        plot_learning_curve(f"{args.task}_{args.mode}")
         return
 
     # Single model evaluation
     if args.model:
         model_path = args.model
     else:
+        # UPDATED CANDIDATES TO MATCH TRAIN.PY FOLDER STRUCTURE
+        model_dir = Path("models") / f"{args.task}_{args.mode}"
         candidates = [
-            Path("models") / args.task / "best" / "best_model.zip",
-            Path("models") / args.task / f"ppo_{args.task}_final.zip",
+            model_dir / "best" / "best_model.zip",
+            model_dir / f"ppo_{args.task}_{args.mode}_final.zip",
         ]
+        
         model_path = next((str(p) for p in candidates if p.exists()), None)
         if model_path is None:
-            print(f"No model found. Train first: python train.py --task {args.task}")
+            print(f"No model found in {model_dir}. Train first: python train.py --task {args.task} --mode {args.mode}")
             return
 
-    print(f"Evaluating {args.episodes} episodes...")
-    stats = evaluate_model(model_path, args.task, args.episodes)
+    print(f"Evaluating {args.episodes} episodes (Task: {args.task}, Mode: {args.mode})...")
+    # Pass the mode to the environment inside evaluate_model
+    stats = evaluate_model(model_path, args.task, args.mode, args.episodes)
     print_report(stats, model_path)
 
 

@@ -33,27 +33,28 @@ class TestDerivatives:
 
     def test_zero_at_origin(self):
         """At origin with zero velocity and no force, all derivatives = 0."""
-        derivs = cw_derivatives(np.zeros(4), self.n, np.zeros(2))
-        np.testing.assert_allclose(derivs, np.zeros(4), atol=1e-12)
+        derivs = cw_derivatives(np.zeros(6), self.n, np.zeros(3))
+        np.testing.assert_allclose(derivs, np.zeros(6), atol=1e-12)
 
     def test_coriolis_term(self):
         """Radial velocity vx > 0 → negative along-track acceleration (Coriolis)."""
-        state  = np.array([0.0, 0.0, 1.0, 0.0])
-        derivs = cw_derivatives(state, self.n, np.zeros(2))
-        assert derivs[3] < 0  # ay = -2n*vx
+        state  = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])   # vx=1 m/s
+        derivs = cw_derivatives(state, self.n, np.zeros(3))
+        assert derivs[4] < 0  # ay = -2n*vx
 
     def test_gravity_gradient(self):
         """Positive radial offset → positive radial acceleration (gravity gradient)."""
-        state  = np.array([100.0, 0.0, 0.0, 0.0])
-        derivs = cw_derivatives(state, self.n, np.zeros(2))
-        assert derivs[2] > 0  # ax = 3n²x
+        state  = np.array([100.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        derivs = cw_derivatives(state, self.n, np.zeros(3))
+        assert derivs[3] > 0  # ax = 3n²x
 
     def test_thrust_adds_directly(self):
         """Applied force should appear directly in acceleration components."""
-        fx, fy = 0.05, -0.03
-        derivs = cw_derivatives(np.zeros(4), self.n, np.array([fx, fy]))
-        np.testing.assert_allclose(derivs[2], fx, atol=1e-12)
-        np.testing.assert_allclose(derivs[3], fy, atol=1e-12)
+        fx, fy, fz = 0.05, -0.03, 0.02
+        derivs = cw_derivatives(np.zeros(6), self.n, np.array([fx, fy, fz]))
+        np.testing.assert_allclose(derivs[3], fx, atol=1e-12)
+        np.testing.assert_allclose(derivs[4], fy, atol=1e-12)
+        np.testing.assert_allclose(derivs[5], fz, atol=1e-12)
 
 
 class TestPropagator:
@@ -229,3 +230,73 @@ class TestOrbitalEnv:
         assert info["outcome"] == "docked"
         assert float(reward) > 100.0, \
             f"Dock bonus should dominate reward, got {float(reward):.2f}"
+
+
+class TestDynamics3D:
+    """Tests for the 3D CW extension."""
+
+    def setup_method(self):
+        self.n = mean_motion(400.0)
+
+    def test_z_axis_decoupled(self):
+        """Out-of-plane motion should not affect in-plane dynamics."""
+        from envs.dynamics import cw_derivatives
+        # Same x,y,vx,vy — different z
+        s_z0  = np.array([100.0, 50.0, 0.0, 1.0, 0.5, 0.0,  0.0,  0.0])
+        s_z50 = np.array([100.0, 50.0, 0.0, 1.0, 0.5, 0.0, 50.0,  0.2])
+        # Map to 6-dim for cw_derivatives
+        s1 = np.array([s_z0[0], s_z0[1], s_z0[6],  s_z0[3],  s_z0[4],  s_z0[7]])
+        s2 = np.array([s_z50[0], s_z50[1], s_z50[6], s_z50[3], s_z50[4], s_z50[7]])
+        d1 = cw_derivatives(s1, self.n, np.zeros(3))
+        d2 = cw_derivatives(s2, self.n, np.zeros(3))
+        # In-plane derivatives (indices 0,1,3,4) must be identical
+        np.testing.assert_allclose(d1[[0,1,3,4]], d2[[0,1,3,4]], atol=1e-12)
+
+    def test_z_harmonic_oscillator(self):
+        """z-axis without thrust should oscillate like -n²z."""
+        from envs.dynamics import cw_derivatives
+        z0 = 100.0
+        state = np.array([0.0, 0.0, z0, 0.0, 0.0, 0.0])
+        derivs = cw_derivatives(state, self.n, np.zeros(3))
+        # az = -n²*z0
+        expected_az = -self.n**2 * z0
+        np.testing.assert_allclose(derivs[5], expected_az, rtol=1e-8)
+
+    def test_3d_propagate_backward_compat(self):
+        """2D propagate calls still work after 3D extension."""
+        from envs.dynamics import propagate
+        s2d = np.array([100.0, 50.0, 0.5, -0.3])
+        f2d = np.array([0.05, -0.02])
+        result = propagate(s2d, self.n, f2d, dt=1.0)
+        assert result.shape == (4,)
+
+    def test_3d_env_obs_shape(self):
+        """3D env should return 7-dim obs for docking."""
+        from envs.orbital_env import OrbitalEnv
+        env = OrbitalEnv(task="docking", mode="3d")
+        obs, _ = env.reset(seed=0)
+        assert obs.shape == (7,), f"Expected (7,), got {obs.shape}"
+
+    def test_3d_env_action_shape(self):
+        """3D env should have 3-dim action space."""
+        from envs.orbital_env import OrbitalEnv
+        env = OrbitalEnv(task="docking", mode="3d")
+        assert env.action_space.shape == (3,)
+
+    def test_3d_station_keeping_obs_shape(self):
+        """3D station_keeping should return 9-dim obs."""
+        from envs.orbital_env import OrbitalEnv
+        env = OrbitalEnv(task="station_keeping", mode="3d")
+        obs, _ = env.reset(seed=0)
+        assert obs.shape == (9,), f"Expected (9,), got {obs.shape}"
+
+    def test_3d_step_runs_without_error(self):
+        """3D env should step cleanly for 10 steps."""
+        from envs.orbital_env import OrbitalEnv
+        env = OrbitalEnv(task="docking", mode="3d")
+        obs, _ = env.reset(seed=0)
+        for _ in range(10):
+            obs, r, done, trunc, info = env.step(env.action_space.sample())
+            if done or trunc:
+                break
+        assert env.observation_space.contains(obs)
